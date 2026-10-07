@@ -17,7 +17,7 @@ A script you paste into the Discord console that **watches a user** and **connec
 
 ## 🚀 Quick start
 
-**1.** Open [discord.com/app](https://discord.com/app) → `F12` → **Console** tab  
+**1.** Open [discord.com/app](https://discord.com/app) or Discord App → `F12` or `CTRL + SHIFT + I` → **Console** tab  
 **2.** If prompted, type `allow pasting` then `Enter`  
 **3.** Paste the script → `Enter` → panel appears 🎉
 
