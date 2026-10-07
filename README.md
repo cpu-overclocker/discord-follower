@@ -34,7 +34,7 @@ A script you paste into the Discord console that **watches a user** and **connec
 | 🎯 **Join their voice** | Click the **voice badge** (works for any shared server or DM) |
 | 👤 **Open profile** | Click avatar, name, or `@username` |
 | 📜 **View logs** | Click **Logs** to expand — badge shows unread count |
-| ⏹️ **Stop** | **Stop follow** or press any key |
+| ⏹️ **Stop** | Click **Stop follow** |
 
 > **Find an ID?** Enable Developer Mode → right-click user → *Copy ID*.
 
@@ -48,10 +48,9 @@ A script you paste into the Discord console that **watches a user** and **connec
 - 🏷️ Voice badge shows **guild icon + guild name + channel name**
 - 🎨 Badge color reflects state (green = same server, blue = other server, grey = offline)
 - 👤 Clickable profile card (opens native Discord profile)
-- 📜 **Collapsible log panel** — replié par défaut, badge compteur pour les nouveaux événements
+- 📜 **Collapsible log panel** — collapsed by default, unread badge counter
 - 📊 Live index bar (`🌐 servers · 🔊 voice channels`)
 - 🖱️ Draggable & collapsible UI (chevron top-right)
-- ⌨️ Stop with any keypress
 - 🔄 Auto-cleanup of previous instances
 
 ---
