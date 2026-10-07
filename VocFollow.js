@@ -151,6 +151,16 @@
   }
   const VoiceActions = findVoiceActions();
 
+  const PermissionStore = findStore('can', (obj) =>
+    typeof obj.getChannelPermissions === 'function' && typeof obj.canWithPartialContext === 'function'
+  );
+  const PERM = {
+    ADMINISTRATOR: 1n << 3n,
+    VIEW_CHANNEL:  1n << 10n,
+    CONNECT:       1n << 20n,
+    MOVE_MEMBERS:  1n << 24n,
+  };
+
   if (!VoiceStore || !ChannelStore || !UserStore || !VoiceActions) {
     alert('[Follow] One of the stores could not be found. Reload Discord.');
     return;
@@ -440,6 +450,11 @@
     #dc-follow-ui .action-btn.stop  { background: #ed4245; color: #fff; }
     #dc-follow-ui .action-btn.stop:hover  { background: #c93b3e; }
     #dc-follow-ui .action-btn svg { width: 14px; height: 14px; fill: currentColor; }
+    #dc-follow-ui .opt-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+      font-size: 12px; color: #b5bac1; cursor: pointer; user-select: none;
+    }
+    #dc-follow-ui .opt-row input { accent-color: #5865f2; cursor: pointer; width: 14px; height: 14px; }
 
     /* ── Index bar (container) ─────────────────── */
     #dc-follow-ui .index-bar {
@@ -554,6 +569,10 @@
       </div>
 
       <div class="action-area" id="dcf-action">
+        <label class="opt-row">
+          <input type="checkbox" id="dcf-disc-with-target">
+          <span>Disconnect with target</span>
+        </label>
         <button class="action-btn start" id="dcf-action-btn">
           <svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg> Start follow
         </button>
@@ -722,6 +741,13 @@
     setVoiceState(true, vs.channelId, gid, variant);
   }
 
+  // La cible quitte le vocal -> je me déconnecte aussi (si la case est cochée)
+  function disconnectWithTarget() {
+    if (!following || !$el('dcf-disc-with-target')?.checked) return;
+    if (!getMyCurrentVoiceChannelId()) return;
+    try { VoiceActions.disconnect(); addLog('Disconnected with target', 'info'); } catch {}
+  }
+
   function startPolling() {
     stopPolling();
     pollTimer = setInterval(() => {
@@ -750,6 +776,7 @@
           if (following) joinVoiceChannel(ch).catch(() => {});
         } else {
           addLog(`${name} → User disconnected`, 'warn');
+          disconnectWithTarget();
         }
       }
     }, 1200);
@@ -760,9 +787,47 @@
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  function canDo(perm, ch) {
+    if (!PermissionStore) return null;
+    try { return !!PermissionStore.can(perm, ch); } catch { return null; }
+  }
+
+  // Retourne { ok: true } ou { ok: false, reason }
+  function checkJoinable(channelId) {
+    const ch = getChannel(channelId);
+    if (!ch) return { ok: true };                       // inconnu : on tente quand même
+    if (ch.type === 1 || ch.type === 3) return { ok: true }; // DM / groupe : pas de permissions de salon
+
+    if (canDo(PERM.VIEW_CHANNEL, ch) === false) return { ok: false, reason: 'no access (View Channel)' };
+    if (canDo(PERM.CONNECT, ch) === false)      return { ok: false, reason: 'no Connect permission' };
+
+    const limit = ch.userLimit || 0;
+    if (limit > 0 && typeof VoiceStore.getVoiceStatesForChannel === 'function') {
+      try {
+        const raw = VoiceStore.getVoiceStatesForChannel(channelId);
+        const states = raw instanceof Map ? Object.fromEntries(raw) : (raw || {});
+        const count = Object.keys(states).length;
+        const alreadyIn = !!(MY_ID && states[MY_ID]);
+        const bypass = canDo(PERM.MOVE_MEMBERS, ch) === true;
+        if (count >= limit && !alreadyIn && !bypass) {
+          return { ok: false, reason: `channel full (${count}/${limit})` };
+        }
+      } catch {}
+    }
+    return { ok: true };
+  }
+
   async function joinVoiceChannel(channelId) {
     const myCurrent = getMyCurrentVoiceChannelId();
     if (myCurrent === channelId) return true;
+
+    const check = checkJoinable(channelId);
+    if (!check.ok) {
+      const gId = CHANNEL_GUILD_MAP.get(channelId);
+      const gName = gId ? getGuildName(gId) : null;
+      addLog(`Can't join #${getVoiceChannelLabel(channelId)}${gName ? ' · ' + gName : ''}: ${check.reason}`, 'warn');
+      return false;
+    }
 
     if (myCurrent && myCurrent !== channelId) {
       try { if (VoiceActions?.disconnect) VoiceActions.disconnect(); } catch {}
