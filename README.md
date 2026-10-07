@@ -3,7 +3,7 @@
 > Follow a Discord user and **automatically join their voice channel** in real time.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-20-5865F2?style=flat-square&logo=discord&logoColor=white" />
+  <img src="https://img.shields.io/badge/version-21-5865F2?style=flat-square&logo=discord&logoColor=white" />
   <img src="https://img.shields.io/badge/Discord-Web-5865F2?style=flat-square&logo=discord&logoColor=white" />
 </p>
 
@@ -11,7 +11,7 @@
 
 ## ✨ At a glance
 
-A script you paste into the Discord console that **watches a user** and **connects you to their voice channel** the moment they join one. Floating, draggable UI with a live log.
+A script you paste into the Discord console that **watches a user** and **connects you to their voice channel** the moment they join one. Works across **all your servers** — no need to be on the same guild as the target. Floating, draggable UI with an opt-in log panel.
 
 ---
 
@@ -31,9 +31,10 @@ A script you paste into the Discord console that **watches a user** and **connec
 |--------|-----|
 | 🔍 **Load a user** | Paste their ID → **Load** |
 | ▶️ **Follow** | Click **Start follow** |
-| 🎯 **Join their voice** | Click the **voice badge** |
-| 🚀 **Other server** | Click **Go** |
-| ⏹️ **Stop** | **Stop** or press any key |
+| 🎯 **Join their voice** | Click the **voice badge** (works for any shared server or DM) |
+| 👤 **Open profile** | Click avatar, name, or `@username` |
+| 📜 **View logs** | Click **Logs** to expand — badge shows unread count |
+| ⏹️ **Stop** | **Stop follow** or press any key |
 
 > **Find an ID?** Enable Developer Mode → right-click user → *Copy ID*.
 
@@ -42,13 +43,34 @@ A script you paste into the Discord console that **watches a user** and **connec
 ## ⚡ Features
 
 - 🎯 Real-time tracking (refresh every 1.2 s)
-- 🔊 Auto-join target's voice channel
-- 🌐 Cross-server detection + **Go** button
-- 👤 Clickable profile card (avatar, name, status)
-- 📜 Timestamped log (info / success / warn / error)
-- 🖱️ Draggable & collapsible UI
+- 🔊 Auto-join target's voice channel — **across all your servers**
+- 🌐 Global index of every server + channel you have access to
+- 🏷️ Voice badge shows **guild icon + guild name + channel name**
+- 🎨 Badge color reflects state (green = same server, blue = other server, grey = offline)
+- 👤 Clickable profile card (opens native Discord profile)
+- 📜 **Collapsible log panel** — replié par défaut, badge compteur pour les nouveaux événements
+- 📊 Live index bar (`🌐 servers · 🔊 voice channels`)
+- 🖱️ Draggable & collapsible UI (chevron top-right)
 - ⌨️ Stop with any keypress
 - 🔄 Auto-cleanup of previous instances
+
+---
+
+## 📜 Logs
+
+The log panel is **collapsed by default** — a small badge appears when new events happen. It only shows **target actions**:
+
+```
+[13:20:01] anis → 🔊・General · Shibuya
+[13:25:12] anis → Call with Bob
+[13:30:00] anis → User disconnected
+```
+
+- `anis → #channel · Server` — target joined / moved to a voice channel (green)
+- `anis → Call with Bob` — target joined a DM or group call (green)
+- `anis → User disconnected` — target left voice / went invisible (orange)
+
+> If the target is on a server you don't share, Discord doesn't expose that info — the target simply appears as `User disconnected`.
 
 ---
 
@@ -64,10 +86,11 @@ A script you paste into the Discord console that **watches a user** and **connec
 
 | Error | Fix |
 |-------|-----|
-| `Cache insuffisant` | Press `F5` and rerun |
-| `Store introuvable` | Discord updated → reload |
-| No join | Check channel permissions |
-| Console blocks paste | Type `allow pasting` |
+| `Cache insufficient` | Press `F5` and rerun |
+| `One of the stores could not be found` | Discord updated → reload the page |
+| Target shows `User disconnected` while in voice | Target is on a server you don't share, or in a DM without you |
+| No auto-join | Check channel permissions (`Connect` + `Speak`) |
+| Console blocks paste | Type `allow pasting` first |
 
 ---
 

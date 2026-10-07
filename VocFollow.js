@@ -1,10 +1,11 @@
 (async () => {
-  // 🔪 Kill toutes les instances précédentes
+  // 🔪 Kill all previous instances
   if (window.__dcfInstances) {
     for (const inst of window.__dcfInstances) {
       try {
         if (inst.pollTimer) clearInterval(inst.pollTimer);
         if (inst.guildCheckTimer) clearInterval(inst.guildCheckTimer);
+        if (inst.reindexTimer) clearInterval(inst.reindexTimer);
         if (inst.ui?.remove) inst.ui.remove();
         if (inst.style?.remove) inst.style.remove();
       } catch {}
@@ -28,8 +29,7 @@
       }]);
     } catch {}
   }
-  if (!CACHE || CACHE_SIZE < 1000) { alert('[Follow] Cache insuffisant'); return; }
-  console.log('[Follow] Cache:', CACHE_SIZE, 'modules');
+  if (!CACHE || CACHE_SIZE < 1000) { alert('[Follow] Cache insufficient'); return; }
 
   let MY_ID = null;
   for (const id in CACHE) {
@@ -43,7 +43,6 @@
     } catch {}
   }
   const TEST_ID = MY_ID || '0';
-  console.log('[Follow] Mon ID:', TEST_ID);
 
   function findStore(methodName, validator) {
     const candidates = [];
@@ -51,7 +50,7 @@
       try {
         const e = CACHE[id]?.exports;
         if (!e) continue;
-        const test = (obj, path) => {
+        const test = (obj) => {
           if (!obj || typeof obj !== 'object') return;
           if ('locale' in obj && 'ast' in obj) return;
           let hasFn = false;
@@ -67,13 +66,13 @@
             cur = Object.getPrototypeOf(cur);
             depth++;
           }
-          candidates.push({ id, path, obj, methods: methods.size });
+          candidates.push({ id, obj, methods: methods.size });
         };
-        test(e, 'exports');
-        if (e.default) test(e.default, 'exports.default');
+        test(e);
+        if (e.default) test(e.default);
         for (const k of Object.keys(e)) {
           if (k === 'default') continue;
-          try { test(e[k], 'exports.' + k); } catch {}
+          try { test(e[k]); } catch {}
         }
       } catch {}
     }
@@ -89,7 +88,6 @@
     if (vs && typeof vs === 'object' && !vs.locale && !vs.ast) return true;
     return false;
   });
-  console.log('[Follow] VoiceStore:', !!VoiceStore);
 
   const ChannelStore = findStore('getChannelIds', (obj) => {
     if (typeof obj.getChannel !== 'function') return false;
@@ -100,14 +98,12 @@
     } catch {}
     return true;
   });
-  console.log('[Follow] ChannelStore:', !!ChannelStore);
 
   const UserStore = findStore('getUser', (obj) => {
     if (typeof obj.getCurrentUser !== 'function') return false;
     const me = obj.getCurrentUser();
     return !!(me?.id && me?.username);
   });
-  console.log('[Follow] UserStore:', !!UserStore);
 
   const GuildStore = findStore('getGuild', (obj) => {
     if (typeof obj.getGuilds !== 'function') return false;
@@ -118,7 +114,6 @@
     } catch {}
     return true;
   });
-  console.log('[Follow] GuildStore:', !!GuildStore);
 
   function findVoiceActions() {
     const candidates = [];
@@ -155,19 +150,14 @@
     return candidates[0]?.obj ?? null;
   }
   const VoiceActions = findVoiceActions();
-  console.log('[Follow] VoiceActions:', !!VoiceActions);
 
   if (!VoiceStore || !ChannelStore || !UserStore || !VoiceActions) {
-    alert('[Follow] Un des stores est introuvable. Recharge Discord.');
+    alert('[Follow] One of the stores could not be found. Reload Discord.');
     return;
   }
 
   function getVoiceStateForUser(userId) {
     try { return VoiceStore.getVoiceStateForUser(userId); } catch { return null; }
-  }
-  function getUserVoiceChannelId(userId) {
-    const vs = getVoiceStateForUser(userId);
-    return vs?.channelId ?? null;
   }
   function getMyCurrentVoiceChannelId() {
     if (!MY_ID) return null;
@@ -195,7 +185,7 @@
     const g = getGuild(guildId);
     return g?.name ?? null;
   }
-  function getDefaultAvatarURL(userId, size = 128) {
+  function getDefaultAvatarURL(userId) {
     try {
       const id = BigInt(userId);
       const idx = Number((id >> 22n) % 6n);
@@ -228,13 +218,8 @@
           const objs = [exp, exp?.default, ...(exp ? Object.values(exp) : [])];
           for (const val of objs) {
             try {
-              if (
-                val &&
-                typeof val === 'object' &&
-                !Array.isArray(val) &&
-                typeof val.dispatch === 'function' &&
-                '_actionHandlers' in val
-              ) {
+              if (val && typeof val === 'object' && !Array.isArray(val)
+                && typeof val.dispatch === 'function' && '_actionHandlers' in val) {
                 dispatcher = val;
                 return;
               }
@@ -256,60 +241,69 @@
 
   function openDiscordProfile(userId) {
     if (!userId || !/^\d{17,20}$/.test(userId)) return;
-
     try {
       const avatarImg = document.querySelector(`img[src*="/users/${userId}/"]`);
       if (avatarImg) {
         const memberEl = avatarImg.closest('[role="listitem"]')
           || avatarImg.closest('[class*="member"]')
           || avatarImg.closest('a[href*="/users/"]');
-        if (memberEl) {
-          memberEl.click();
-          return;
-        }
+        if (memberEl) { memberEl.click(); return; }
       }
     } catch {}
-
     try {
       const flux = getFluxDispatcher();
-      if (flux) {
-        flux.dispatch({ type: 'USER_PROFILE_MODAL_OPEN', userId });
-        return;
-      }
+      if (flux) { flux.dispatch({ type: 'USER_PROFILE_MODAL_OPEN', userId }); return; }
     } catch {}
-
-    try {
-      window.open(`discord://-/users/${userId}`);
-    } catch {}
+    try { window.open(`discord://-/users/${userId}`); } catch {}
   }
 
   const CHANNEL_CACHE = new Map();
+  const CHANNEL_GUILD_MAP = new Map();
   let VOICE_CHANNELS = [];
+  let MY_GUILDS = new Set();
 
-  function indexGuildChannels() {
+  function indexAllGuildsChannels() {
     CHANNEL_CACHE.clear();
+    CHANNEL_GUILD_MAP.clear();
     VOICE_CHANNELS = [];
-    const guildId = getGuildId();
-    if (!guildId) return { total: 0, voice: 0 };
+    MY_GUILDS = new Set();
+
+    if (!GuildStore) return { total: 0, voice: 0, guilds: 0 };
+
+    let guildCount = 0;
     try {
-      const ids = ChannelStore.getChannelIds(guildId);
-      const arr = ids?._array ?? (Array.isArray(ids) ? ids : (ids ? Object.values(ids) : []));
-      for (const cid of arr) {
+      const guilds = GuildStore.getGuilds();
+      const guildArr = guilds?._array
+        ?? (Array.isArray(guilds) ? guilds : (guilds ? Object.values(guilds) : []));
+
+      for (const g of guildArr) {
+        if (!g || !g.id) continue;
+        MY_GUILDS.add(g.id);
+        guildCount++;
         try {
-          const ch = ChannelStore.getChannel(cid);
-          if (!ch || !ch.id) continue;
-          CHANNEL_CACHE.set(ch.id, ch);
-          if (ch.type === 2 || ch.type === 13) VOICE_CHANNELS.push(ch);
+          const ids = ChannelStore.getChannelIds(g.id);
+          const arr = ids?._array
+            ?? (Array.isArray(ids) ? ids : (ids ? Object.values(ids) : []));
+          for (const cid of arr) {
+            try {
+              const ch = ChannelStore.getChannel(cid);
+              if (!ch || !ch.id) continue;
+              CHANNEL_CACHE.set(ch.id, ch);
+              CHANNEL_GUILD_MAP.set(ch.id, g.id);
+              if (ch.type === 2 || ch.type === 13) {
+                VOICE_CHANNELS.push({ ch, guildId: g.id });
+              }
+            } catch {}
+          }
         } catch {}
       }
     } catch (e) {
-      console.warn('[Follow] indexGuildChannels err:', e.message);
+      console.warn('[Follow] indexAllGuildsChannels err:', e.message);
     }
-    return { total: CHANNEL_CACHE.size, voice: VOICE_CHANNELS.length };
+    return { total: CHANNEL_CACHE.size, voice: VOICE_CHANNELS.length, guilds: guildCount };
   }
 
-  const idx = indexGuildChannels();
-  console.log(`[Follow] Index: ${idx.total} channels, ${idx.voice} vocaux`);
+  indexAllGuildsChannels();
 
   const style = document.createElement('style');
   style.id = 'dc-follow-style';
@@ -340,14 +334,15 @@
     #dc-follow-ui .titlebar-icon svg { width: 13px; height: 13px; fill: #fff; }
     #dc-follow-ui .titlebar-title { font-size: 13px; font-weight: 600; color: #f2f3f5; }
     #dc-follow-ui .close-btn {
-      width: 24px; height: 24px; border-radius: 50%; border: none;
+      width: 24px; height: 24px; border-radius: 6px; border: none;
       background: transparent; cursor: pointer; display: flex; align-items: center;
       justify-content: center; color: #80848e;
+      transition: background .15s, color .15s;
     }
     #dc-follow-ui .close-btn:hover { background: #ed4245; color: #fff; }
     #dc-follow-ui .close-btn svg { width: 14px; height: 14px; pointer-events: none; }
     #dc-follow-ui .collapse-btn {
-      width: 24px; height: 24px; border-radius: 50%; border: none;
+      width: 24px; height: 24px; border-radius: 6px; border: none;
       background: transparent; cursor: pointer; display: flex; align-items: center;
       justify-content: center; color: #80848e;
       transition: background .15s, color .15s, transform .2s;
@@ -369,7 +364,6 @@
       cursor: pointer;
     }
     #dc-follow-ui .load-btn:hover { background: #4752c4; }
-    #dc-follow-ui .load-btn:disabled { opacity: .45; }
     #dc-follow-ui .err-msg {
       margin-top: 8px; font-size: 12px; color: #f38ba8;
       background: #2c1a1d; border-radius: 6px; border: 1px solid #5c2530;
@@ -393,14 +387,9 @@
       cursor: pointer;
       transition: opacity .15s, filter .15s, color .15s;
     }
-    #dc-follow-ui .avatar.clickable:hover {
-      filter: brightness(1.15) drop-shadow(0 0 6px rgba(88,101,242,.6));
-    }
+    #dc-follow-ui .avatar.clickable:hover { filter: brightness(1.15) drop-shadow(0 0 6px rgba(88,101,242,.6)); }
     #dc-follow-ui .profile-name.clickable:hover,
-    #dc-follow-ui .profile-user.clickable:hover {
-      color: #5865f2;
-      text-decoration: underline;
-    }
+    #dc-follow-ui .profile-user.clickable:hover { color: #5865f2; text-decoration: underline; }
     #dc-follow-ui .status-dot {
       position: absolute; bottom: 1px; right: 1px; width: 13px; height: 13px;
       border-radius: 50%; border: 2.5px solid #232428;
@@ -419,36 +408,27 @@
     #dc-follow-ui .voice-badge {
       display: inline-flex; align-items: center; gap: 5px;
       margin-top: 7px; padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 600;
-      max-width: 100%;
+      max-width: 100%; flex-wrap: wrap; row-gap: 2px;
     }
     #dc-follow-ui .voice-badge.in-voice  { background: #1a3a2a; color: #23a559; border: 1px solid #23a559; }
     #dc-follow-ui .voice-badge.out-voice { background: #1e1f22; color: #80848e; border: 1px solid #2e3035; }
-    #dc-follow-ui .voice-badge.other-guild { background: #3a2a1a; color: #f0b132; border: 1px solid #f0b132; }
-    #dc-follow-ui .voice-badge.clickable {
-      cursor: pointer;
-      transition: background .15s, border-color .15s, transform .1s;
-    }
-    #dc-follow-ui .voice-badge.clickable:hover {
-      transform: scale(1.02);
-    }
-    #dc-follow-ui .voice-badge.in-voice.clickable:hover {
-      background: #1f4a35;
-      border-color: #2fbf6a;
-    }
-    #dc-follow-ui .voice-badge.other-guild.clickable:hover {
-      background: #4a3520;
-      border-color: #ffc75a;
-    }
-    #dc-follow-ui .voice-badge.clickable:active {
-      transform: scale(0.98);
-    }
+    #dc-follow-ui .voice-badge.other-guild { background: #1a2a3a; color: #4fc3f7; border: 1px solid #4fc3f7; }
+    #dc-follow-ui .voice-badge.clickable { cursor: pointer; transition: transform .1s; }
+    #dc-follow-ui .voice-badge.clickable:hover { transform: scale(1.02); }
     #dc-follow-ui .voice-badge svg {
       width: 11px; height: 11px;
       fill: none; stroke: currentColor; stroke-width: 2;
       stroke-linecap: round; stroke-linejoin: round;
       flex-shrink: 0;
     }
-    #dc-follow-ui .voice-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #dc-follow-ui .voice-badge span {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      max-width: 100%;
+    }
+    #dc-follow-ui .voice-badge-guild-icon {
+      width: 14px; height: 14px; border-radius: 4px;
+      flex-shrink: 0; object-fit: cover;
+    }
     #dc-follow-ui .action-area { margin-top: 12px; display: none; }
     #dc-follow-ui .action-btn {
       width: 100%; height: 36px; border-radius: 8px; border: none;
@@ -460,61 +440,57 @@
     #dc-follow-ui .action-btn.stop  { background: #ed4245; color: #fff; }
     #dc-follow-ui .action-btn.stop:hover  { background: #c93b3e; }
     #dc-follow-ui .action-btn svg { width: 14px; height: 14px; fill: currentColor; }
-    #dc-follow-ui .status-bar {
+
+    /* ── Index bar (container) ─────────────────── */
+    #dc-follow-ui .index-bar {
       margin-top: 10px; display: flex; align-items: center; gap: 8px;
       font-size: 11px; color: #80848e; padding: 6px 10px;
       background: #1e1f22; border-radius: 6px; border: 1px solid #111214;
     }
-    #dc-follow-ui .status-bar .dot {
-      width: 8px; height: 8px; border-radius: 50%; background: #80848e;
+    #dc-follow-ui .index-bar .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #5865f2;
     }
-    #dc-follow-ui .status-bar.active .dot { background: #23a559; box-shadow: 0 0 8px #23a559; }
-    #dc-follow-ui .status-bar.voice .dot { background: #5865f2; }
-    #dc-follow-ui .goto-bar {
-      margin-top: 10px; display: none; align-items: center; gap: 8px;
-      padding: 8px 10px; background: #2c1a1d; border-radius: 6px;
-      border: 1px solid #5c2530; font-size: 11px; color: #f0b132;
+
+    /* ── Logs toggle (no container) ────────────── */
+    #dc-follow-ui .log-toggle {
+      margin-top: 8px; width: 100%; height: 26px;
+      display: flex; align-items: center; gap: 6px;
+      padding: 0; border: none; background: transparent;
+      color: #80848e; font-size: 11px; font-weight: 600;
+      cursor: pointer;
+      transition: color .15s;
     }
-    #dc-follow-ui .goto-bar.visible { display: flex; }
-    #dc-follow-ui .goto-icon {
-      width: 26px; height: 26px; border-radius: 8px;
-      background: #1e1f22; display: flex; align-items: center; justify-content: center;
-      overflow: hidden; flex-shrink: 0;
-      color: #f0b132; font-weight: 700; font-size: 12px;
+    #dc-follow-ui .log-toggle:hover { color: #dbdee1; }
+    #dc-follow-ui .log-toggle .log-toggle-chevron {
+      width: 12px; height: 12px; flex-shrink: 0;
+      transition: transform .2s;
     }
-    #dc-follow-ui .goto-icon img { width: 100%; height: 100%; object-fit: cover; }
-    #dc-follow-ui .goto-info { flex: 1; min-width: 0; }
-    #dc-follow-ui .goto-guild {
-      font-size: 11px; color: #f2f3f5; font-weight: 600;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    #dc-follow-ui .log-toggle.open .log-toggle-chevron { transform: rotate(180deg); }
+    #dc-follow-ui .log-toggle.open { color: #dbdee1; }
+    #dc-follow-ui .log-badge {
+      margin-left: auto;
+      background: #5865f2; color: #fff;
+      font-size: 10px; font-weight: 700;
+      padding: 1px 6px; border-radius: 10px;
+      min-width: 18px; text-align: center;
     }
-    #dc-follow-ui .goto-channel {
-      font-size: 10px; color: #80848e;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      margin-top: 1px;
-    }
-    #dc-follow-ui .goto-btn {
-      padding: 5px 10px; border-radius: 4px;
-      border: 1px solid #f0b132; background: transparent;
-      color: #f0b132; font-size: 11px; font-weight: 600;
-      cursor: pointer; transition: background .15s, color .15s;
-      flex-shrink: 0; white-space: nowrap;
-    }
-    #dc-follow-ui .goto-btn:hover { background: #f0b132; color: #2b2d31; }
+    #dc-follow-ui .log-badge:empty { display: none; }
+
+    /* ── Logs container ────────────────────────── */
     #dc-follow-ui .log-area {
-      display: none; margin-top: 10px; background: #1e1f22; border-radius: 6px;
-      border: 1px solid #111214; padding: 8px; max-height: 160px; overflow-y: auto;
+      display: none; margin-top: 6px;
+      background: #1e1f22; border-radius: 6px;
+      border: 1px solid #111214;
+      padding: 8px;
+      max-height: 160px; overflow-y: auto;
       user-select: text; -webkit-user-select: text;
-      scrollbar-width: thin;
-      scrollbar-color: #5865f2 transparent;
+      scrollbar-width: thin; scrollbar-color: #5865f2 transparent;
     }
+    #dc-follow-ui .log-area.open { display: block; }
     #dc-follow-ui .log-area::-webkit-scrollbar { width: 6px; height: 6px; }
     #dc-follow-ui .log-area::-webkit-scrollbar-track { background: transparent; margin: 4px 0; }
-    #dc-follow-ui .log-area::-webkit-scrollbar-thumb { background: #3a3d44; border-radius: 3px; transition: background .15s; }
+    #dc-follow-ui .log-area::-webkit-scrollbar-thumb { background: #3a3d44; border-radius: 3px; }
     #dc-follow-ui .log-area:hover::-webkit-scrollbar-thumb { background: #5865f2; }
-    #dc-follow-ui .log-area::-webkit-scrollbar-thumb:hover { background: #4752c4; }
-    #dc-follow-ui .log-area::-webkit-scrollbar-thumb:active { background: #3c46a6; }
-    #dc-follow-ui .log-area::-webkit-scrollbar-corner { background: transparent; }
     #dc-follow-ui .log-entry {
       font-size: 11px; font-family: 'Consolas',monospace; line-height: 1.7;
       white-space: pre-wrap; word-break: break-all;
@@ -524,6 +500,11 @@
     #dc-follow-ui .log-entry.success { color: #23a559; }
     #dc-follow-ui .log-entry.warn    { color: #f0b132; }
     #dc-follow-ui .log-entry.error   { color: #ed4245; }
+    #dc-follow-ui .log-empty {
+      font-size: 11px; font-family: 'Consolas',monospace;
+      color: #5c6169; font-style: italic;
+      padding: 2px 0;
+    }
   `;
   document.head.appendChild(style);
 
@@ -538,35 +519,35 @@
         <span class="titlebar-title">Discord Follow</span>
       </div>
       <div class="titlebar-right">
-        <button class="collapse-btn" id="dcf-collapse" title="Réduire / Agrandir">
+        <button class="collapse-btn" id="dcf-collapse" title="Collapse / Expand">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="6 9 12 15 18 9"/>
           </svg>
         </button>
-        <button class="close-btn" id="dcf-close" title="Fermer">
+        <button class="close-btn" id="dcf-close" title="Close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
     </div>
     <div class="body">
       <div class="input-row">
-        <input id="dcf-id-input" type="text" placeholder="ID utilisateur Discord…" autocomplete="off">
-        <button class="load-btn" id="dcf-load-btn">Charger</button>
+        <input id="dcf-id-input" type="text" placeholder="Discord user ID…" autocomplete="off">
+        <button class="load-btn" id="dcf-load-btn">Load</button>
       </div>
       <div class="err-msg" id="dcf-err"></div>
 
       <div class="profile-card" id="dcf-profile">
         <div class="profile-top">
           <div class="avatar-wrap">
-            <div class="avatar" id="dcf-avatar" title="Cliquer pour voir le profil Discord"><span id="dcf-initials"></span></div>
+            <div class="avatar" id="dcf-avatar" title="Click to view Discord profile"><span id="dcf-initials"></span></div>
             <div class="status-dot offline" id="dcf-dot"></div>
           </div>
           <div class="profile-info">
-            <div class="profile-name" id="dcf-name" title="Cliquer pour voir le profil Discord">—</div>
-            <div class="profile-user" id="dcf-user" title="Cliquer pour voir le profil Discord">—</div>
+            <div class="profile-name" id="dcf-name" title="Click to view Discord profile">—</div>
+            <div class="profile-user" id="dcf-user" title="Click to view Discord profile">—</div>
             <div class="voice-badge out-voice" id="dcf-voice-badge">
               <svg viewBox="0 0 24 24"><path d="M12 1a3 3 0 0 1 3 3v8a3 3 0 0 1-6 0V4a3 3 0 0 1 3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-              <span id="dcf-voice-label">Hors vocal</span>
+              <span id="dcf-voice-label">Not in voice</span>
             </div>
           </div>
         </div>
@@ -578,26 +559,21 @@
         </button>
       </div>
 
-      <div class="status-bar" id="dcf-status">
+      <div class="index-bar" id="dcf-index-bar">
         <div class="dot"></div>
-        <span id="dcf-status-text">Prêt</span>
+        <span id="dcf-index-text">Indexing…</span>
       </div>
 
-      <div class="status-bar voice" id="dcf-index-bar">
-        <div class="dot"></div>
-        <span id="dcf-index-text">Indexation…</span>
+      <button class="log-toggle" id="dcf-log-toggle" type="button">
+        <svg class="log-toggle-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+        <span>Logs</span>
+        <span class="log-badge" id="dcf-log-badge"></span>
+      </button>
+      <div class="log-area" id="dcf-log">
+        <div class="log-empty" id="dcf-log-empty">No logs</div>
       </div>
-
-      <div class="goto-bar" id="dcf-goto-bar">
-        <div class="goto-icon" id="dcf-goto-icon">?</div>
-        <div class="goto-info">
-          <div class="goto-guild" id="dcf-goto-guild">—</div>
-          <div class="goto-channel" id="dcf-goto-channel">—</div>
-        </div>
-        <button class="goto-btn" id="dcf-goto-btn">🚀 Aller</button>
-      </div>
-
-      <div class="log-area" id="dcf-log"></div>
     </div>
   `;
   document.body.appendChild(ui);
@@ -626,127 +602,98 @@
     e.style.display = msg ? 'block' : 'none';
     e.textContent = msg || '';
   }
+
+  let logsExpanded = false;
+  let unreadLogs = 0;
+
+  function updateLogToggle() {
+    const badge = $el('dcf-log-badge');
+    badge.textContent = logsExpanded ? '' : (unreadLogs > 0 ? String(unreadLogs) : '');
+  }
+
   function addLog(msg, type = 'info') {
     const la = $el('dcf-log');
-    la.style.display = 'block';
+
+    const empty = $el('dcf-log-empty');
+    if (empty) empty.remove();
+
     const d = document.createElement('div');
     d.className = 'log-entry ' + type;
-    const t = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const t = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     d.textContent = `[${t}] ${msg}`;
     la.appendChild(d);
     la.scrollTop = la.scrollHeight;
-    while (la.children.length > 80) la.removeChild(la.firstChild);
+    while (la.querySelectorAll('.log-entry').length > 80) {
+      la.querySelector('.log-entry')?.remove();
+    }
+
+    if (!logsExpanded) {
+      unreadLogs++;
+      updateLogToggle();
+    }
   }
+
   function getInitials(name) {
     return (name || '?').split(/\s+/).slice(0, 2).map(w => (w[0] || '').toUpperCase()).join('') || '?';
   }
-  function setVoiceState(inVoice, label, variant = 'in-voice') {
+
+  function getTargetName() {
+    if (!TARGET_USER_ID) return 'target';
+    const u = getUser(TARGET_USER_ID);
+    return u?.globalName || u?.global_name || u?.username || `…${TARGET_USER_ID.slice(-4)}`;
+  }
+
+  function getVoiceChannelLabel(channelId) {
+    const ch = getChannel(channelId);
+    if (!ch) return channelId;
+    if (ch.type === 1) {
+      const rec = ch.recipients?.[0];
+      const u = rec ? getUser(rec) : null;
+      return u?.globalName || u?.username || 'DM';
+    }
+    if (ch.type === 3) return ch.name || 'Group DM';
+    return ch.name ?? channelId;
+  }
+
+  function setVoiceState(inVoice, channelId, guildId, variant = 'in-voice') {
     const badge = $el('dcf-voice-badge');
     const lbl   = $el('dcf-voice-label');
     const dot   = $el('dcf-dot');
+
+    badge.querySelectorAll('.voice-badge-guild-icon').forEach(el => el.remove());
+
     if (inVoice) {
       badge.className = 'voice-badge ' + variant;
-      lbl.textContent = label ? `En vocal — ${label}` : 'En vocal';
+
+      const chName = getVoiceChannelLabel(channelId);
+      const gName  = guildId ? (getGuildName(guildId) ?? `…${guildId.slice(-4)}`) : null;
+      lbl.textContent = gName ? `${gName} · ${chName}` : chName;
+
+      if (guildId) {
+        const iconURL = getGuildIconURL(guildId, 32);
+        if (iconURL) {
+          const img = document.createElement('img');
+          img.className = 'voice-badge-guild-icon';
+          img.src = iconURL;
+          img.onerror = () => img.remove();
+          badge.insertBefore(img, lbl);
+        }
+      }
+
       dot.className = 'status-dot online';
       badge.classList.add('clickable');
-      badge.title = 'Cliquer pour rejoindre ce vocal';
+      badge.title = `Join: ${lbl.textContent}`;
     } else {
       badge.className = 'voice-badge out-voice';
-      lbl.textContent = label ? label : 'Hors vocal';
+      lbl.textContent = 'Not in voice';
       dot.className = 'status-dot offline';
       badge.classList.remove('clickable');
       badge.removeAttribute('title');
     }
   }
-  function setStatus(text, active) {
-    $el('dcf-status-text').textContent = text;
-    $el('dcf-status').classList.toggle('active', !!active);
-  }
+
   function setIndexStatus(text) {
     $el('dcf-index-text').textContent = text;
-  }
-
-  let pendingGotoGuild = null;
-  let pendingGotoChannel = null;
-
-  function showGotoBar(guildId, channelId) {
-    pendingGotoGuild = guildId;
-    pendingGotoChannel = channelId;
-    const bar = $el('dcf-goto-bar');
-    const guildNm = getGuildName(guildId) ?? guildId;
-    const chNm = getChannel(channelId)?.name ?? channelId;
-    $el('dcf-goto-guild').textContent = guildNm;
-    $el('dcf-goto-channel').textContent = '#' + chNm;
-    const iconEl = $el('dcf-goto-icon');
-    const iconURL = getGuildIconURL(guildId, 48);
-    if (iconURL) {
-      iconEl.innerHTML = '';
-      const img = document.createElement('img');
-      img.src = iconURL;
-      img.onerror = () => { iconEl.innerHTML = getInitials(guildNm); };
-      iconEl.appendChild(img);
-    } else {
-      iconEl.innerHTML = getInitials(guildNm);
-    }
-    bar.classList.add('visible');
-  }
-
-  function hideGotoBar() {
-    pendingGotoGuild = null;
-    pendingGotoChannel = null;
-    $el('dcf-goto-bar').classList.remove('visible');
-  }
-
-  function navigateToGuild(guildId) {
-    const selectors = [
-      `[data-list-item-id="guildsnav___${guildId}"]`,
-      `[data-list-item-id*="${guildId}"]`,
-      `a[href*="/channels/${guildId}"]`,
-    ];
-    for (const sel of selectors) {
-      try {
-        const el = document.querySelector(sel);
-        if (el) { el.click(); return true; }
-      } catch {}
-    }
-    try {
-      const ids = ChannelStore.getChannelIds(guildId);
-      const arr = ids?._array ?? (Array.isArray(ids) ? ids : (ids ? Object.values(ids) : []));
-      for (const cid of arr) {
-        const ch = ChannelStore.getChannel(cid);
-        if (ch && (ch.type === 0 || ch.type === 2)) {
-          history.pushState({}, '', `/channels/${guildId}/${cid}`);
-          window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-          return true;
-        }
-      }
-    } catch {}
-    return false;
-  }
-
-  function gotoPendingGuild() {
-    if (!pendingGotoGuild) return;
-    const gid = pendingGotoGuild;
-    addLog(`🚀 Navigation vers "${getGuildName(gid) ?? gid}"…`, 'info');
-    if (!navigateToGuild(gid)) {
-      addLog('❌ Impossible de naviguer vers le serveur', 'error');
-      return;
-    }
-    setTimeout(() => {
-      const vs = getVoiceStateForUser(TARGET_USER_ID);
-      const currentCh = vs?.channelId ?? null;
-      const currentG = vs?.guildId ?? null;
-      if (currentCh && currentG === gid) {
-        hideGotoBar();
-        currentChannelId = currentCh;
-        currentGuildId = currentG;
-        addLog(`Connexion à ${getChannel(currentCh)?.name ?? currentCh}…`, 'info');
-        joinVoiceChannel(currentCh).catch(e => addLog('Join err: ' + e.message, 'error'));
-      } else {
-        addLog('Cible plus dans le même salon, annulé', 'warn');
-        hideGotoBar();
-      }
-    }, 2500);
   }
 
   let TARGET_USER_ID = null;
@@ -755,86 +702,54 @@
   let following = false;
   let pollTimer = null;
   let guildCheckTimer = null;
+  let reindexTimer = null;
   let lastKnownMyGuild = null;
 
   function updateIndexDisplay() {
-    const guildId = getGuildId();
-    if (!guildId) {
-      setIndexStatus(`📍 MP · pas de serveur`);
-      return;
-    }
-    const total = CHANNEL_CACHE.size;
     const voice = VOICE_CHANNELS.length;
-    const gname = getGuildName(guildId);
-    setIndexStatus(`📁 ${total} salons · 🔊 ${voice} vocaux${gname ? ' · ' + gname : ''}`);
+    const guilds = MY_GUILDS.size;
+    setIndexStatus(`🌐 ${guilds} servers · 🔊 ${voice} voice channels`);
   }
   updateIndexDisplay();
 
-  function refreshVoiceUI() {
-    if (!TARGET_USER_ID) return;
+  function updateVoiceUI() {
+    if (!TARGET_USER_ID) { setVoiceState(false, null, null); return; }
     const vs = getVoiceStateForUser(TARGET_USER_ID);
-    if (vs?.channelId) {
-      const ch = getChannel(vs.channelId);
-      const nm = ch?.name ?? vs.channelId;
-      const gname = vs.guildId ? (getGuildName(vs.guildId) ?? vs.guildId.slice(-4)) : null;
-      const isOtherGuild = vs.guildId && vs.guildId !== getGuildId();
-      const label = gname ? `${nm} · ${gname}` : nm;
-      setVoiceState(true, label, isOtherGuild ? 'other-guild' : 'in-voice');
-    } else {
-      setVoiceState(false, 'Hors vocal');
-    }
+    if (!vs?.channelId) { setVoiceState(false, null, null); return; }
+    const gid = vs.guildId || CHANNEL_GUILD_MAP.get(vs.channelId) || null;
+    const isSameGuild = gid && gid === getGuildId();
+    const variant = gid ? (isSameGuild ? 'in-voice' : 'other-guild') : 'in-voice';
+    setVoiceState(true, vs.channelId, gid, variant);
   }
 
   function startPolling() {
     stopPolling();
     pollTimer = setInterval(() => {
-      // ✅ On continue si on a un TARGET (même hors follow)
       if (!TARGET_USER_ID) return;
 
       const vs = getVoiceStateForUser(TARGET_USER_ID);
       const ch = vs?.channelId ?? null;
-      const guild = vs?.guildId ?? null;
+      const guild = vs?.guildId || CHANNEL_GUILD_MAP.get(ch) || null;
 
       if (ch !== currentChannelId || guild !== currentGuildId) {
+        currentChannelId = ch;
+        currentGuildId = guild;
+
+        tryUpdateUserProfile(TARGET_USER_ID);
+        updateVoiceUI();
+
+        const name = getTargetName();
+
         if (ch) {
-          const channel = getChannel(ch);
-          const nm = channel?.name ?? ch;
-          const myGuild = getGuildId();
-          const gname = guild ? (getGuildName(guild) ?? guild.slice(-4)) : null;
-          const label = gname ? `${nm} · ${gname}` : nm;
+          const chName = getVoiceChannelLabel(ch);
+          const gName  = guild ? getGuildName(guild) : null;
+          const suffix = gName ? ` · ${gName}` : '';
 
-          tryUpdateUserProfile(TARGET_USER_ID);
+          addLog(`${name} → ${chName}${suffix}`, 'success');
 
-          if (guild && guild !== myGuild) {
-            currentChannelId = ch;
-            currentGuildId = guild;
-            if (following) addLog(`📍 Cible sur "${gname}" → #${nm}`, 'warn');
-            setVoiceState(true, label, 'other-guild');
-            setStatus(`Cible sur : ${gname}`, false);
-            showGotoBar(guild, ch);
-            return;
-          }
-
-          hideGotoBar();
-          currentChannelId = ch;
-          currentGuildId = guild;
-
-          // 🔔 Logs + join uniquement si follow actif
-          if (following) {
-            addLog(`🔊 Cible rejoint : ${nm}`, 'success');
-            setStatus(`Cible en vocal : ${nm}`, true);
-            joinVoiceChannel(ch).catch(e => addLog('Join err: ' + e.message, 'error'));
-          }
-
-          // ✅ Toujours mettre à jour le badge
-          setVoiceState(true, label);
+          if (following) joinVoiceChannel(ch).catch(() => {});
         } else {
-          currentChannelId = null;
-          currentGuildId = null;
-          if (following) addLog('🔇 Cible hors vocal.', 'warn');
-          setVoiceState(false, 'Hors vocal');
-          if (following) setStatus('En attente…', false);
-          hideGotoBar();
+          addLog(`${name} → User disconnected`, 'warn');
         }
       }
     }, 1200);
@@ -846,31 +761,18 @@
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   async function joinVoiceChannel(channelId) {
-    const ch = getChannel(channelId);
-    const nm = ch?.name ?? channelId;
     const myCurrent = getMyCurrentVoiceChannelId();
-    if (myCurrent === channelId) {
-      addLog('Déjà connecté à ' + nm, 'info');
-      return true;
-    }
+    if (myCurrent === channelId) return true;
+
     if (myCurrent && myCurrent !== channelId) {
-      addLog(`Changement de vocal (${getChannel(myCurrent)?.name ?? myCurrent} → ${nm})`, 'info');
-      try { if (VoiceActions?.disconnect) VoiceActions.disconnect(); } catch (e) { addLog('Disconnect err: ' + e.message, 'warn'); }
+      try { if (VoiceActions?.disconnect) VoiceActions.disconnect(); } catch {}
       await sleep(1500);
     }
-    addLog('Connexion à ' + nm + ' (instantané)…', 'info');
+
     try {
       VoiceActions.selectVoiceChannel(channelId);
-      addLog('✅ Action envoyée pour ' + nm, 'success');
-      setTimeout(() => {
-        const nowIn = getMyCurrentVoiceChannelId();
-        if (nowIn === channelId) addLog('🎯 Confirmé dans ' + nm, 'success');
-        else if (nowIn === null) addLog('⚠️ Pas de confirmation', 'warn');
-        else addLog(`⚠️ Dans un autre vocal : ${getChannel(nowIn)?.name ?? nowIn}`, 'warn');
-      }, 3000);
       return true;
-    } catch (e) {
-      addLog('VoiceActions err: ' + e.message, 'error');
+    } catch {
       return false;
     }
   }
@@ -879,9 +781,8 @@
     if (!userId || userId === 'unknown') return false;
     const u = getUser(userId);
     if (!u) return false;
-
     const currentName = $el('dcf-name').textContent;
-    if (currentName && currentName !== 'Utilisateur inconnu') return false;
+    if (currentName && currentName !== 'Unknown user') return false;
 
     const displayName = u.globalName || u.global_name || u.username;
     const handle = u.discriminator && u.discriminator !== '0'
@@ -895,50 +796,41 @@
     avatarEl.querySelector('img')?.remove();
     const img = document.createElement('img');
     img.src = getUserAvatarURL(userId, u.avatar, 128);
-    img.onerror = () => {
-      img.src = getDefaultAvatarURL(userId, 128);
-    };
+    img.onerror = () => { img.src = getDefaultAvatarURL(userId, 128); };
     avatarEl.appendChild(img);
 
     $el('dcf-avatar').classList.add('clickable');
     $el('dcf-name').classList.add('clickable');
     $el('dcf-user').classList.add('clickable');
 
-    addLog(`✅ Profil mis à jour : ${displayName}`, 'success');
     return true;
   }
 
   function loadUser(id) {
     id = id.trim();
-    if (!/^\d{17,20}$/.test(id)) { setError('ID invalide.'); return; }
+    if (!/^\d{17,20}$/.test(id)) { setError('Invalid ID.'); return; }
     setError('');
 
     $el('dcf-profile').style.display = 'none';
     $el('dcf-action').style.display = 'none';
 
     const u = getUser(id);
-
     if (u) {
       const displayName = u.globalName || u.global_name || u.username;
       const handle = u.discriminator && u.discriminator !== '0'
         ? `${u.username}#${u.discriminator}` : `@${u.username}`;
-
       $el('dcf-initials').textContent = '';
       $el('dcf-name').textContent = displayName;
       $el('dcf-user').textContent = handle;
-
       const avatarEl = $el('dcf-avatar');
       avatarEl.querySelector('img')?.remove();
       const img = document.createElement('img');
       img.src = getUserAvatarURL(id, u.avatar, 128);
-      img.onerror = () => {
-        img.src = getDefaultAvatarURL(id, 128);
-      };
+      img.onerror = () => { img.src = getDefaultAvatarURL(id, 128); };
       avatarEl.appendChild(img);
-      addLog(`Profil chargé`, 'success');
     } else {
       $el('dcf-initials').textContent = '';
-      $el('dcf-name').textContent = 'Utilisateur inconnu';
+      $el('dcf-name').textContent = 'Unknown user';
       $el('dcf-user').textContent = id;
       const avatarEl = $el('dcf-avatar');
       avatarEl.querySelector('img')?.remove();
@@ -946,7 +838,6 @@
       img.src = getDefaultAvatarURL(id, 128);
       img.onerror = () => { img.remove(); $el('dcf-initials').textContent = '?'; };
       avatarEl.appendChild(img);
-      addLog(`Profil inconnu → suivi seul. Le pseudo s'affichera dès qu'il rejoindra un vocal.`, 'warn');
     }
 
     $el('dcf-avatar').classList.add('clickable');
@@ -954,27 +845,16 @@
     $el('dcf-user').classList.add('clickable');
 
     TARGET_USER_ID = id;
+
+    const vs = getVoiceStateForUser(id);
+    currentChannelId = vs?.channelId ?? null;
+    currentGuildId = vs?.guildId || CHANNEL_GUILD_MAP.get(vs?.channelId) || null;
+
     $el('dcf-profile').style.display = 'block';
     $el('dcf-action').style.display = 'block';
 
-    refreshVoiceUI();
-
-    // ✅ Démarre le polling pour surveiller l'état vocal (même hors follow)
+    updateVoiceUI();
     startPolling();
-
-    const vs = getVoiceStateForUser(id);
-    if (vs?.channelId) {
-      const ch = getChannel(vs.channelId);
-      const gname = vs.guildId ? (getGuildName(vs.guildId) ?? vs.guildId.slice(-4)) : null;
-      const isOther = vs.guildId && vs.guildId !== getGuildId();
-      if (isOther) {
-        addLog(`📍 Cible en vocal : #${ch?.name ?? vs.channelId} · ${gname}`, 'warn');
-      } else {
-        addLog(`📍 Cible en vocal : ${ch?.name ?? vs.channelId}${gname ? ' · ' + gname : ''}`, 'success');
-      }
-    } else {
-      addLog(`Cible hors vocal (en attente…)`, 'info');
-    }
   }
 
   function startFollow() {
@@ -983,37 +863,24 @@
     const btn = $el('dcf-action-btn');
     btn.className = 'action-btn stop';
     btn.innerHTML = `<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12"/></svg> Stop follow`;
-    addLog(`Suivi de ${TARGET_USER_ID} démarré`, 'info');
-    setStatus('Surveillance active', true);
-    indexGuildChannels();
+
+    indexAllGuildsChannels();
     updateIndexDisplay();
+
     const vs = getVoiceStateForUser(TARGET_USER_ID);
     const chId = vs?.channelId ?? null;
-    const guild = vs?.guildId ?? null;
-    if (chId) {
-      currentChannelId = chId;
-      currentGuildId = guild;
-      const ch = getChannel(chId);
-      const gname = guild ? (getGuildName(guild) ?? guild.slice(-4)) : null;
-      const label = gname ? `${ch?.name ?? chId} · ${gname}` : (ch?.name ?? chId);
+    const guild = vs?.guildId ?? CHANNEL_GUILD_MAP.get(chId) ?? null;
 
-      tryUpdateUserProfile(TARGET_USER_ID);
+    currentChannelId = chId;
+    currentGuildId = guild;
 
-      const isOther = guild && guild !== getGuildId();
-      if (isOther) {
-        setVoiceState(true, label, 'other-guild');
-        addLog(`Cible sur un autre serveur : ${gname}`, 'warn');
-        showGotoBar(guild, chId);
-      } else {
-        setVoiceState(true, label);
-        addLog(`Cible déjà en vocal : ${ch?.name ?? chId}`, 'info');
-        joinVoiceChannel(chId).catch(e => addLog('Join err: ' + e.message, 'error'));
-      }
-    } else {
-      setVoiceState(false, 'Hors vocal');
-      addLog('Cible hors vocal sur les serveurs en commun · en attente…', 'warn');
-    }
+    tryUpdateUserProfile(TARGET_USER_ID);
+    updateVoiceUI();
+
+    if (chId) joinVoiceChannel(chId).catch(() => {});
+
     startPolling();
+
     let ignoreKeys = true;
     setTimeout(() => { ignoreKeys = false; }, 1500);
     const onKey = e => {
@@ -1027,7 +894,6 @@
 
   function stopFollow() {
     following = false;
-    // ⚠️ On garde le polling actif si un user est chargé
     if (!TARGET_USER_ID) stopPolling();
     if (ui._stopKey) {
       document.removeEventListener('keydown', ui._stopKey);
@@ -1036,14 +902,13 @@
     const btn = $el('dcf-action-btn');
     btn.className = 'action-btn start';
     btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg> Start follow`;
-    setStatus('Arrêté', false);
-    hideGotoBar();
-    addLog('Suivi arrêté.', 'error');
+    updateVoiceUI();
   }
 
   function destroyUI() {
     try { stopPolling(); } catch {}
     try { if (guildCheckTimer) clearInterval(guildCheckTimer); } catch {}
+    try { if (reindexTimer) clearInterval(reindexTimer); } catch {}
     if (ui._stopKey) {
       try { document.removeEventListener('keydown', ui._stopKey); } catch {}
       ui._stopKey = null;
@@ -1053,71 +918,49 @@
     }
     try { ui.remove(); } catch {}
     try { document.getElementById('dc-follow-style')?.remove(); } catch {}
-    console.log('[Discord Follow] Nettoyage complet effectué');
   }
 
   lastKnownMyGuild = getGuildId();
   guildCheckTimer = setInterval(() => {
     const currentMyGuild = getGuildId();
-    if (!currentMyGuild && lastKnownMyGuild) {
-      lastKnownMyGuild = null;
-      updateIndexDisplay();
-      return;
-    }
-    if (currentMyGuild && !lastKnownMyGuild) {
+    if (currentMyGuild !== lastKnownMyGuild) {
       lastKnownMyGuild = currentMyGuild;
-      indexGuildChannels();
       updateIndexDisplay();
-      return;
-    }
-    if (currentMyGuild && currentMyGuild !== lastKnownMyGuild) {
-      lastKnownMyGuild = currentMyGuild;
-      if (!following) indexGuildChannels();
-      updateIndexDisplay();
-      if (following && TARGET_USER_ID) {
-        const vs = getVoiceStateForUser(TARGET_USER_ID);
-        if (vs?.channelId && vs.guildId) {
-          if (vs.guildId !== currentMyGuild) showGotoBar(vs.guildId, vs.channelId);
-          else hideGotoBar();
-        }
-      }
     }
   }, 1500);
 
-  $el('dcf-collapse').addEventListener('click', () => {
-    ui.classList.toggle('collapsed');
-  });
+  reindexTimer = setInterval(() => {
+    indexAllGuildsChannels();
+    updateIndexDisplay();
+  }, 30000);
 
-  $el('dcf-avatar').addEventListener('click', () => {
-    if (!TARGET_USER_ID) return;
-    openDiscordProfile(TARGET_USER_ID);
-  });
+  $el('dcf-collapse').addEventListener('click', () => ui.classList.toggle('collapsed'));
 
-  $el('dcf-name').addEventListener('click', () => {
-    if (!TARGET_USER_ID) return;
-    openDiscordProfile(TARGET_USER_ID);
-  });
+  $el('dcf-avatar').addEventListener('click', () => { if (TARGET_USER_ID) openDiscordProfile(TARGET_USER_ID); });
+  $el('dcf-name').addEventListener('click',   () => { if (TARGET_USER_ID) openDiscordProfile(TARGET_USER_ID); });
+  $el('dcf-user').addEventListener('click',   () => { if (TARGET_USER_ID) openDiscordProfile(TARGET_USER_ID); });
 
-  $el('dcf-user').addEventListener('click', () => {
-    if (!TARGET_USER_ID) return;
-    openDiscordProfile(TARGET_USER_ID);
-  });
-
-  // ─── Clic badge → REJOINDRE le vocal ───────────────────────────
   $el('dcf-voice-badge').addEventListener('click', async () => {
     if (!TARGET_USER_ID) return;
-
     const vs = getVoiceStateForUser(TARGET_USER_ID);
     const chId = vs?.channelId ?? null;
     if (!chId) return;
+    try { await joinVoiceChannel(chId); } catch {}
+  });
 
-    const chName = getChannel(chId)?.name ?? chId;
-    addLog(`🎯 Clic badge → rejoindre ${chName}`, 'info');
-
-    try {
-      await joinVoiceChannel(chId);
-    } catch (e) {
-      addLog('Join err: ' + e.message, 'error');
+  $el('dcf-log-toggle').addEventListener('click', () => {
+    logsExpanded = !logsExpanded;
+    const la = $el('dcf-log');
+    const toggle = $el('dcf-log-toggle');
+    if (logsExpanded) {
+      la.classList.add('open');
+      toggle.classList.add('open');
+      unreadLogs = 0;
+      updateLogToggle();
+      la.scrollTop = la.scrollHeight;
+    } else {
+      la.classList.remove('open');
+      toggle.classList.remove('open');
     }
   });
 
@@ -1128,26 +971,14 @@
   $el('dcf-action-btn').addEventListener('click', () => {
     if (!following) startFollow(); else stopFollow();
   });
-  $el('dcf-goto-btn').addEventListener('click', gotoPendingGuild);
-
-  $el('dcf-close').addEventListener('click', () => {
-    destroyUI();
-  });
+  $el('dcf-close').addEventListener('click', () => destroyUI());
 
   window.__dcfInstances.push({
     pollTimer,
     guildCheckTimer,
+    reindexTimer,
     ui,
     style,
     destroy: destroyUI,
   });
-
-  console.log('[Discord Follow v20] Prêt !');
-  console.log('  VoiceStore:', !!VoiceStore);
-  console.log('  ChannelStore:', !!ChannelStore);
-  console.log('  UserStore:', !!UserStore);
-  console.log('  GuildStore:', !!GuildStore);
-  console.log('  VoiceActions:', !!VoiceActions);
-  console.log('  Mon ID:', MY_ID);
-  console.log('  Index:', CHANNEL_CACHE.size, 'channels /', VOICE_CHANNELS.length, 'vocaux');
 })();
